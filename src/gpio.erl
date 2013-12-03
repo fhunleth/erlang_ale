@@ -5,7 +5,7 @@
 %%
 %% The one-process-per-pin design has been choosen since it allows to
 %% attach each pin to the appropriate place in the supervision tree of
-%% the entire application.  
+%% the entire application.
 %% @end
 %% @copyright 2013 Erlang Solutions Limited
 
@@ -42,7 +42,7 @@
           direction = input :: pin_direction(),
           interrupt = none  :: pin_interrupt(),
           port              :: port(),
-          pending   = []    :: [term()] 
+          pending   = []    :: [term()]
         }).
 
 %%%===================================================================
@@ -131,7 +131,7 @@ call_existing(Pin, Msg) ->
 
 
 init([Pin, Direction]) ->
-  SharedLib = "priv/gpio_port",
+  SharedLib = code:priv_dir(erlang_ale) ++ "/gpio_port",
   %%    ok = port_lib:load_driver(SharedLib),
   register(Pin),
   Port = port_lib:open_port(SharedLib),
@@ -216,7 +216,7 @@ handle_cast(_Msg, State) ->
 
 
 %% In order to be able to test using a mocking library we call
-%% the from_port/2 function for all messages from the port. 
+%% the from_port/2 function for all messages from the port.
 handle_info({Port, {data, Msg}},
             #state{port=Port, pin=Pin}=State) ->
   timer:apply_after(0, ?MODULE, from_port, [Pin, binary_to_term(Msg)]),
