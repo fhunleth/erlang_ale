@@ -17,7 +17,7 @@ send_to_port(Owner, Port, Msg) ->
       Port ! {Owner, {command, term_to_binary(Msg)}}.
 %%    io:format("send_to_port: Bin=~p~n", [Bin]),
 %%    erlang:port_command(Port, Bin).
-    
+
 sync_call_to_port(Port, Msg) ->
 
     send_to_port(self(), Port, Msg),
@@ -26,6 +26,7 @@ sync_call_to_port(Port, Msg) ->
             Result = binary_to_term(BinResult),
 %%--            io:format("sync_call_to_port result: ~p~n", [Result]),
             Result
+    after 500 -> exit({error, port_timeout})
     end.
 
 %% @doc the response to this call has to be handled in the handle_info
