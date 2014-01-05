@@ -1,12 +1,13 @@
 /**
-* @file   gpio_port.c
-* @author Erlang Solutions Ltd
-* @brief  GPIO erlang interface
-* @description
-*
-* @section LICENSE
-* Copyright (C) 2013 Erlang Solutions Ltd.
-**/
+ * @file   gpio_port.c
+ * @author Erlang Solutions Ltd
+ * @brief  GPIO erlang interface
+ * @description
+ *
+ * @section LICENSE
+ * Copyright (C) 2013 Erlang Solutions Ltd.
+ * Copyright (C) 2014 Frank Hunleth
+ */
 
 #include <stdio.h>
 #include <unistd.h>
@@ -21,13 +22,9 @@
 #include <erl_interface.h>
 #include <ei.h>
 
-#define BUF_SIZE 1024
-
-/*! \addtogroup GPIO
-*  @brief GPIO library functions
-*  @{
-*/
-
+/*
+ * GPIO handling definitions and prototypes
+ */
 enum gpio_state {
     GPIO_CLOSED,
     GPIO_OUTPUT,
@@ -43,6 +40,16 @@ struct gpio {
 
 int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir);
 int gpio_release(struct gpio *pin);
+
+/*
+ * Erlang request/response processing
+ */
+#define BUF_SIZE 1024
+struct erlcmd
+{
+    unsigned char buffer[BUF_SIZE];
+    ssize_t index;
+};
 
 void erlcmd_send(ETERM *response);
 
@@ -70,9 +77,13 @@ int sysfs_write_file(const char *pathname, const char *value)
     return written;
 }
 
-
 // GPIO functions
 
+/**
+ * @brief       Initialize a GPIO structure
+ *
+ * @param	pin           The pin structure
+ */
 void gpio_init(struct gpio *pin)
 {
     pin->state = GPIO_CLOSED;
@@ -81,10 +92,11 @@ void gpio_init(struct gpio *pin)
 }
 
 /**
- * @brief	Initialises the devname GPIO device
+ * @brief	Open and configure a GPIO
  *
- * @param	pin_number            The GPIO pin
- * @param       dir                   Direction of pin (input or output)
+ * @param	pin           The pin structure
+ * @param	pin_number    The GPIO pin
+ * @param       dir           Direction of pin (input or output)
  *
  * @return 	1 for success, -1 for failure
  */
@@ -130,7 +142,7 @@ int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir)
 /**
  * @brief	Release a GPIO pin
  *
- * @param	pin            The GPIO pin
+ * @param	pin           The pin structure
  *
  * @return 	1 for success, -1 for failure
  */
@@ -156,7 +168,7 @@ int gpio_release(struct gpio *pin)
 /**
  * @brief	Set pin with the value "0" or "1"
  *
- * @param	pin            The GPIO pin
+ * @param	pin           The pin structure
  * @param       value         Value to set (0 or 1)
  *
  * @return 	1 for success, -1 for failure
@@ -217,6 +229,12 @@ int gpio_set_int(struct gpio *pin, const char *mode)
     return 1;
 }
 
+/**
+ * Called after poll() returns when the GPIO sysfs file indicates
+ * a status change.
+ *
+ * @param pin which pin to check
+ */
 void gpio_process(struct gpio *pin)
 {
     int value = gpio_read(pin);
@@ -231,12 +249,11 @@ void gpio_process(struct gpio *pin)
     erl_free_term(resp);
 }
 
-struct erlcmd
-{
-    unsigned char buffer[BUF_SIZE];
-    ssize_t index;
-};
-
+/**
+ * Initialize an Erlang command handler.
+ *
+ * @param handler the structure to initialize
+ */
 void erlcmd_init(struct erlcmd *handler)
 {
     erl_init(NULL, 0);
@@ -245,6 +262,8 @@ void erlcmd_init(struct erlcmd *handler)
 
 /**
  * @brief Synchronously send a response back to Erlang
+ *
+ * @param response what to send back
  */
 void erlcmd_send(ETERM *response)
 {
@@ -287,7 +306,9 @@ ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
     ssize_t msglen = ntohs(be_len);
     if (msglen + sizeof(uint16_t) > sizeof(handler->buffer))
 	errx(EXIT_FAILURE, "Message too long");
-    else if (msglen + sizeof(uint16_t) < handler->index)
+
+    /* Check whether we've received the entire message */
+    if (msglen + sizeof(uint16_t) < handler->index)
 	return 0;
 
     ETERM *emsg = erl_decode(handler->buffer + sizeof(uint16_t));
@@ -392,9 +413,8 @@ void erlcmd_process(struct erlcmd *handler, struct gpio *pin)
     ssize_t amount_read = read(STDIN_FILENO, handler->buffer, sizeof(handler->buffer) - handler->index);
     if (amount_read < 0) {
 	/* EINTR is ok to get, since we were interrupted by a signal. */
-	if (errno == EINTR) {
+	if (errno == EINTR)
 	    return;
-	}
 
 	/* Everything else is unexpected. */
 	err(EXIT_FAILURE, "read");
@@ -445,6 +465,9 @@ int main()
 	fdset[1].events = POLLPRI;
 	fdset[1].revents = 0;
 
+	/* Always fill out the fdset structure, but only have poll() monitor
+	 * the sysfs file if interrupts are enabled.
+	 */
 	int rc = poll(fdset, pin.state == GPIO_INPUT_WITH_INTERRUPTS ? 2 : 1, -1);
 	if (rc < 0) {
 	    /* Retry if EINTR */
@@ -454,20 +477,11 @@ int main()
 	    err(EXIT_FAILURE, "poll");
 	}
 
-	if (rc && (fdset[0].revents & (POLLIN | POLLHUP))) {
+	if (fdset[0].revents & (POLLIN | POLLHUP))
 	    erlcmd_process(&handler, &pin);
-	    rc--;
-	}
 
-	if (rc && (fdset[1].revents & POLLPRI)) {
+	if (fdset[1].revents & POLLPRI)
 	    gpio_process(&pin);
-	    rc--;
-	}
-
-	/* For debugging only. */
-	if (rc != 0)
-	    errx(EXIT_FAILURE, "Unexpected return from poll(). rc=%d, revents(0)=0x%04x, revents(1)=0x%04x",
-		 rc, fdset[0].revents, fdset[1].revents);
     }
 
     return 0;
