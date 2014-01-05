@@ -201,7 +201,7 @@ handle_call({from_port, {port_reply, To, Msg}}=FullMsg,
             _From,
             #state{pending=Pending}=State) ->
   %% @todo: should we do something if To is not in Pending list?
-  io:format("FullMsg=~p~n", [FullMsg]),
+  %%io:format("FullMsg=~p~n", [FullMsg]),
   NewPending = lists:delete(To, Pending),
   gen_server:reply(To, Msg),
   {reply, ok, State#state{pending=NewPending}}.
