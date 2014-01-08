@@ -36,6 +36,9 @@ struct gpio {
     enum gpio_state state;
     int fd;
     int pin_number;
+
+    /* 1 if the pin was already exported */
+    int already_exported;
 };
 
 int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir);
@@ -89,6 +92,7 @@ void gpio_init(struct gpio *pin)
     pin->state = GPIO_CLOSED;
     pin->fd = -1;
     pin->pin_number = -1;
+    pin->already_exported = 0;
 }
 
 /**
@@ -106,16 +110,24 @@ int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir)
     if (pin->state != GPIO_CLOSED)
 	gpio_release(pin);
 
+    /* Construct the gpio control file paths */
+    char direction_path[64];
+    sprintf(direction_path, "/sys/class/gpio/gpio%d/direction", pin_number);
+
+    char value_path[64];
+    sprintf(value_path, "/sys/class/gpio/gpio%d/value", pin_number);
+
     /* Check if the gpio has been exported already. */
-    char path[64];
-    sprintf(path, "/sys/class/gpio/gpio%d/direction", pin_number);
-    if (access(path, F_OK) == -1) {
+    if (access(value_path, F_OK) == -1) {
 	/* Nope. Export it. */
 	char pinstr[64];
 	sprintf(pinstr, "%d", pin_number);
 	if (!sysfs_write_file("/sys/class/gpio/export", pinstr))
 	    return -1;
-    }
+
+	pin->already_exported = 0;
+    } else
+	pin->already_exported = 1;
 
     const char *dirstr;
     if (strcmp(dir, "input") == 0) {
@@ -125,16 +137,25 @@ int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir)
 	dirstr = "out";
 	pin->state = GPIO_OUTPUT;
     } else
-	return 1;
+	return -1;
 
-    if (!sysfs_write_file(path, dirstr))
-	return 1;
+    /* The direction file may not exist if the pin only works one way.
+       It is ok if the direction file doesn't exist, but if it does
+       exist, we must be able to write it.
+    */
+    if (access(direction_path, F_OK) != -1) {
+	if (!sysfs_write_file(direction_path, dirstr))
+	    return -1;
+    }
 
     pin->pin_number = pin_number;
 
     /* Open the value file for quick access later */
-    sprintf(path, "/sys/class/gpio/gpio%d/value", pin_number);
-    pin->fd = open(path, pin->state == GPIO_OUTPUT ? O_RDWR : O_RDONLY);
+    pin->fd = open(value_path, pin->state == GPIO_OUTPUT ? O_RDWR : O_RDONLY);
+    if (pin->fd < 0) {
+	gpio_release(pin);
+	return -1;
+    }
 
     return 1;
 }
@@ -152,13 +173,16 @@ int gpio_release(struct gpio *pin)
 	return 1;
 
     /* Close down the value file */
-    close(pin->fd);
+    if (pin->fd != -1)
+	close(pin->fd);
     pin->fd = -1;
 
-    /* Unexport the pin */
-    char pinstr[64];
-    sprintf(pinstr, "%d", pin->pin_number);
-    sysfs_write_file("/sys/class/gpio/unexport", pinstr);
+    /* Unexport the pin if we exported it initially. */
+    if (!pin->already_exported) {
+	char pinstr[64];
+	sprintf(pinstr, "%d", pin->pin_number);
+	sysfs_write_file("/sys/class/gpio/unexport", pinstr);
+    }
 
     pin->state = GPIO_CLOSED;
     pin->pin_number = -1;
