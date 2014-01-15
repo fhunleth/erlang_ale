@@ -332,7 +332,7 @@ ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
 	errx(EXIT_FAILURE, "Message too long");
 
     /* Check whether we've received the entire message */
-    if (msglen + sizeof(uint16_t) < handler->index)
+    if (msglen + sizeof(uint16_t) > handler->index)
 	return 0;
 
     ETERM *emsg = erl_decode(handler->buffer + sizeof(uint16_t));
