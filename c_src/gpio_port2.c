@@ -19,8 +19,7 @@
 #include <poll.h>
 #include <err.h>
 
-#include <erl_interface.h>
-#include <ei.h>
+#include "erlcmd.h"
 
 /*
  * GPIO handling definitions and prototypes
@@ -43,18 +42,6 @@ struct gpio {
 
 int gpio_open(struct gpio *pin, unsigned int pin_number, const char *dir);
 int gpio_release(struct gpio *pin);
-
-/*
- * Erlang request/response processing
- */
-#define BUF_SIZE 1024
-struct erlcmd
-{
-    unsigned char buffer[BUF_SIZE];
-    ssize_t index;
-};
-
-void erlcmd_send(ETERM *response);
 
 /**
  * @brief write a string to a sysfs file
@@ -274,76 +261,17 @@ void gpio_process(struct gpio *pin)
 }
 
 /**
- * Initialize an Erlang command handler.
- *
- * @param handler the structure to initialize
+ * @brief Handle a request from Erlang
  */
-void erlcmd_init(struct erlcmd *handler)
+void gpio_handle_request(ETERM *emsg, void *cookie)
 {
-    erl_init(NULL, 0);
-    memset(handler, 0, sizeof(*handler));
-}
+    struct gpio *pin = (struct gpio *) cookie;
 
-/**
- * @brief Synchronously send a response back to Erlang
- *
- * @param response what to send back
- */
-void erlcmd_send(ETERM *response)
-{
-    unsigned char buf[1024];
+    ETERM *emsg_type = erl_element(1, emsg);
+    if (emsg_type == NULL)
+	errx(EXIT_FAILURE, "erl_element(emsg_type)");
 
-    if (erl_encode(response, buf + sizeof(uint16_t)) == 0)
-	errx(EXIT_FAILURE, "erl_encode");
-
-    ssize_t len = erl_term_len(response);
-    uint16_t be_len = htons(len);
-    memcpy(buf, &be_len, sizeof(be_len));
-
-    len += sizeof(uint16_t);
-    ssize_t wrote = 0;
-    do {
-	ssize_t amount_written = write(STDOUT_FILENO, buf + wrote, len - wrote);
-	if (amount_written < 0) {
-	    if (errno == EINTR)
-		continue;
-
-	    err(EXIT_FAILURE, "write");
-	}
-
-	wrote += amount_written;
-    } while (wrote < len);
-}
-
-/**
- * @brief Dispatch commands in the buffer
- * @return the number of bytes processed
- */
-ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
-{
-    /* Check for length field */
-    if (handler->index < sizeof(uint16_t))
-	return 0;
-
-    uint16_t be_len;
-    memcpy(&be_len, handler->buffer, sizeof(uint16_t));
-    ssize_t msglen = ntohs(be_len);
-    if (msglen + sizeof(uint16_t) > sizeof(handler->buffer))
-	errx(EXIT_FAILURE, "Message too long");
-
-    /* Check whether we've received the entire message */
-    if (msglen + sizeof(uint16_t) > handler->index)
-	return 0;
-
-    ETERM *emsg = erl_decode(handler->buffer + sizeof(uint16_t));
-    if (emsg == NULL)
-	errx(EXIT_FAILURE, "erl_decode");
-
-    ETERM *msg_type = erl_element(1, emsg);
-    if (msg_type == NULL)
-	errx(EXIT_FAILURE, "erl_element(msg_type)");
-
-    if (strcmp(ERL_ATOM_PTR(msg_type), "init") == 0) {
+    if (strcmp(ERL_ATOM_PTR(emsg_type), "init") == 0) {
 	ETERM *arg1p = erl_element(2, emsg);
 	ETERM *arg2p = erl_element(3, emsg);
 	if (arg1p == NULL || arg2p == NULL)
@@ -362,7 +290,7 @@ ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
 	erl_free_term(arg1p);
 	erl_free_term(arg2p);
 	erl_free_term(resp);
-    } else if (strcmp(ERL_ATOM_PTR(msg_type), "cast") == 0) {
+    } else if (strcmp(ERL_ATOM_PTR(emsg_type), "cast") == 0) {
 	ETERM *arg1p = erl_element(2, emsg);
 	if (arg1p == NULL)
 	    errx(EXIT_FAILURE, "cast: arg1p was NULL");
@@ -373,7 +301,7 @@ ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
 	    errx(EXIT_FAILURE, "cast: bad command");
 
 	erl_free_term(arg1p);
-    } else if (strcmp(ERL_ATOM_PTR(msg_type), "call") == 0) {
+    } else if (strcmp(ERL_ATOM_PTR(emsg_type), "call") == 0) {
 	ETERM *refp = erl_element(2, emsg);
         ETERM *tuplep = erl_element(3, emsg);
 	if (refp == NULL || tuplep == NULL)
@@ -423,47 +351,7 @@ ssize_t erlcmd_dispatch(struct erlcmd *handler, struct gpio *pin)
 	errx(EXIT_FAILURE, "unexpected element");
      }
 
-     erl_free_term(emsg);
-     erl_free_term(msg_type);
-
-     return msglen + sizeof(uint16_t);
-}
-
-/**
- * @brief call to process any new requests from Erlang
- */
-void erlcmd_process(struct erlcmd *handler, struct gpio *pin)
-{
-    ssize_t amount_read = read(STDIN_FILENO, handler->buffer, sizeof(handler->buffer) - handler->index);
-    if (amount_read < 0) {
-	/* EINTR is ok to get, since we were interrupted by a signal. */
-	if (errno == EINTR)
-	    return;
-
-	/* Everything else is unexpected. */
-	err(EXIT_FAILURE, "read");
-    } else if (amount_read == 0) {
-	/* EOF. Erlang process was terminated. This happens after a release or if there was an error. */
-	exit(EXIT_SUCCESS);
-    }
-
-    handler->index += amount_read;
-    for (;;) {
-	ssize_t bytes_processed = erlcmd_dispatch(handler, pin);
-
-	if (bytes_processed == 0) {
-	    /* Only have part of the command to process. */
-	    break;
-	} else if (handler->index > bytes_processed) {
-	    /* Processed the command and there's more data. */
-	    memmove(handler->buffer, &handler->buffer[bytes_processed], handler->index - bytes_processed);
-	    handler->index -= bytes_processed;
-	} else {
-	    /* Processed the whole buffer. */
-	    handler->index = 0;
-	    break;
-	}
-    }
+     erl_free_term(emsg_type);
 }
 
 /**
@@ -475,8 +363,8 @@ int main()
     struct gpio pin;
     struct erlcmd handler;
 
-    erlcmd_init(&handler);
     gpio_init(&pin);
+    erlcmd_init(&handler, gpio_handle_request, &pin);
 
     for (;;) {
 	struct pollfd fdset[2];
@@ -502,7 +390,7 @@ int main()
 	}
 
 	if (fdset[0].revents & (POLLIN | POLLHUP))
-	    erlcmd_process(&handler, &pin);
+	    erlcmd_process(&handler);
 
 	if (fdset[1].revents & POLLPRI)
 	    gpio_process(&pin);
