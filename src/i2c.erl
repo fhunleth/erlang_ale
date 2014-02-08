@@ -126,12 +126,11 @@ handle_call({call, write, Data}, _From, #state{port=Port} = State) ->
     {reply, Reply, State};
 
 handle_call({call, read, Len}, _From, #state{port=Port} = State) ->
-    Res = port_lib:sync_call_to_port(Port, {i2c_read, Len}),
-    case Res of
-	-1 ->
+    case port_lib:sync_call_to_port(Port, {i2c_read, Len}) < 0 of
+	true ->
 	    Reply = {error, i2c_read_error};
-	Reply ->
-	    ok
+	false ->
+	    Reply = ok
     end,
     {reply, Reply, State}.
 
